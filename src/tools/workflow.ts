@@ -137,6 +137,7 @@ interface WorkflowMonthlyBrandSegment {
 interface WorkflowMonthlyPriority {
   action: string;
   owner: WorkflowOwner;
+  ownerLabel: string;
   impact: WorkflowImpact;
   clientSummary: string;
 }
@@ -155,7 +156,15 @@ interface WorkflowMonthlyAppendix {
   steps: WorkflowMonthlyAppendixStep[];
 }
 
+interface WorkflowMonthlyTopSummary {
+  headline: string;
+  whatImproved: string[];
+  needsAttention: string[];
+  doingNext: string[];
+}
+
 interface WorkflowMonthlyReportSection {
+  summary: WorkflowMonthlyTopSummary;
   comparison: {
     current: { startDate: string; endDate: string };
     previous: { startDate: string; endDate: string };
@@ -486,14 +495,160 @@ function buildMonthlyAnalystAppendix(report: WorkflowReport): WorkflowMonthlyApp
   };
 }
 
+function buildMonthlyPriorities(actions: WorkflowActionItem[]): WorkflowMonthlyPriority[] {
+  return actions.slice(0, 5).map((action) => ({
+    action: action.action,
+    owner: action.owner,
+    ownerLabel: getMonthlyPriorityOwnerLabel(action.owner),
+    impact: action.impact,
+    clientSummary: action.clientSummary,
+  }));
+}
+
+function isPositiveMonthlyMetric(metric: WorkflowMonthlyMetric): boolean {
+  if (metric.direction === 'flat') return false;
+  return metric.label === 'Average Position' ? metric.direction === 'down' : metric.direction === 'up';
+}
+
+function isNegativeMonthlyMetric(metric: WorkflowMonthlyMetric): boolean {
+  if (metric.direction === 'flat') return false;
+  return metric.label === 'Average Position' ? metric.direction === 'up' : metric.direction === 'down';
+}
+
+function describeMonthlySummaryMetric(metric: WorkflowMonthlyMetric): string {
+  if (metric.label === 'Average Position') {
+    return `Average Position ${isPositiveMonthlyMetric(metric) ? 'improved' : 'softened'} to ${metric.current.toFixed(1)} (${formatMonthlyDelta(metric)} versus previous period).`;
+  }
+  return `${metric.label} reached ${formatMonthlyMetricValue(metric)} (${formatMonthlyDelta(metric)} versus previous period).`;
+}
+
+function describeMonthlyWinner(
+  row: WorkflowMonthlyComparisonRow,
+  type: 'query' | 'page',
+): string {
+  const subject = type === 'query' ? `"${row.label}"` : row.label;
+  if (row.clicksDelta > 0) {
+    return `${subject} delivered the clearest ${type}-level lift, adding ${row.clicksDelta} clicks and ${row.impressionsDelta} impressions versus the previous period.`;
+  }
+  return `${subject} expanded visibility by ${row.impressionsDelta} impressions while holding clicks steady and improving average position by ${row.positionDelta.toFixed(1)}.`;
+}
+
+function describeMonthlyDecline(row: WorkflowMonthlyComparisonRow): string {
+  return `${row.label} softened versus the previous period and should be reviewed if that trend continues.`;
+}
+
+function normalizeMonthlyPrioritySummary(summary: string): string {
+  const trimmed = summary.replace(/^Recommended next step:\s*/i, '').trim();
+  return trimmed.endsWith('.') ? trimmed : `${trimmed}.`;
+}
+
+function getMonthlySummaryHeadline(
+  kpiSummary: WorkflowMonthlyMetric[],
+  topQueryWinner: WorkflowMonthlyComparisonRow | undefined,
+  topPageWinner: WorkflowMonthlyComparisonRow | undefined,
+  biggestDecline: WorkflowMonthlyComparisonRow | undefined,
+  note?: string,
+): string {
+  if (note) {
+    return 'This month\'s detailed comparison was limited, so the report below focuses on workflow findings and next steps.';
+  }
+
+  if (kpiSummary.length === 0 && !topQueryWinner && !topPageWinner && !biggestDecline) {
+    return 'No meaningful month-over-month movement stood out in the selected period.';
+  }
+
+  const positiveSignals =
+    kpiSummary.filter(isPositiveMonthlyMetric).length +
+    Number(Boolean(topQueryWinner)) +
+    Number(Boolean(topPageWinner));
+  const negativeSignals =
+    kpiSummary.filter(isNegativeMonthlyMetric).length + Number(Boolean(biggestDecline));
+
+  if (positiveSignals === 0 && negativeSignals === 0) {
+    return 'No meaningful month-over-month movement stood out in the selected period.';
+  }
+
+  if (positiveSignals > 0 && negativeSignals === 0) {
+    return 'Organic search moved in the right direction this month, with stronger visibility and no major declines.';
+  }
+  if (positiveSignals > negativeSignals) {
+    return 'Organic search moved in the right direction overall this month, with a few areas still worth watching.';
+  }
+  if (negativeSignals > positiveSignals) {
+    return 'Organic search softened this month and needs a closer look at the pages and queries that slipped.';
+  }
+  return 'Organic search was mixed this month, with gains in some areas and softer movement in others.';
+}
+
+function buildMonthlyTopSummary({
+  kpiSummary,
+  topQueryWinner,
+  topPageWinner,
+  biggestDecline,
+  nextMonthPriorities,
+  note,
+}: {
+  kpiSummary: WorkflowMonthlyMetric[];
+  topQueryWinner?: WorkflowMonthlyComparisonRow;
+  topPageWinner?: WorkflowMonthlyComparisonRow;
+  biggestDecline?: WorkflowMonthlyComparisonRow;
+  nextMonthPriorities: WorkflowMonthlyPriority[];
+  note?: string;
+}): WorkflowMonthlyTopSummary {
+  const positiveMetricHighlights = kpiSummary
+    .filter(isPositiveMonthlyMetric)
+    .slice(0, 2)
+    .map(describeMonthlySummaryMetric);
+  const positiveMovementHighlights = [
+    ...(topQueryWinner ? [describeMonthlyWinner(topQueryWinner, 'query')] : []),
+    ...(topPageWinner ? [describeMonthlyWinner(topPageWinner, 'page')] : []),
+  ];
+  const whatImproved = [
+    ...positiveMetricHighlights,
+    ...positiveMovementHighlights,
+  ].slice(0, 3);
+
+  const needsAttention = [
+    ...(note ? [note] : []),
+    ...kpiSummary.filter(isNegativeMonthlyMetric).map(describeMonthlySummaryMetric),
+    ...(biggestDecline ? [describeMonthlyDecline(biggestDecline)] : []),
+  ].slice(0, 3);
+
+  const doingNext = nextMonthPriorities.slice(0, 3).map((priority) => {
+    const summary = normalizeMonthlyPrioritySummary(priority.clientSummary);
+    return `${priority.ownerLabel}: ${summary}`;
+  });
+
+  if (doingNext.length === 0) {
+    doingNext.push(
+      note
+        ? 'Review the workflow findings and rerun the monthly comparison once the missing data is available.'
+        : 'No immediate next steps were pulled through from this run.',
+    );
+  }
+
+  return {
+    headline: getMonthlySummaryHeadline(kpiSummary, topQueryWinner, topPageWinner, biggestDecline, note),
+    whatImproved,
+    needsAttention,
+    doingNext,
+  };
+}
+
 function buildMonthlySeoFallbackSection(
   report: WorkflowReport,
   note: string,
 ): WorkflowMonthlyReportSection {
   const currentRange = report.site.dateRange;
   const previousRange = getPreviousDateRange(currentRange.startDate, currentRange.endDate);
+  const nextMonthPriorities = buildMonthlyPriorities(report.actions);
 
   return {
+    summary: buildMonthlyTopSummary({
+      kpiSummary: [],
+      nextMonthPriorities,
+      note,
+    }),
     comparison: {
       current: currentRange,
       previous: previousRange,
@@ -513,10 +668,33 @@ function buildMonthlySeoFallbackSection(
       improvingPages: [],
     },
     brandPerformance: [],
-    nextMonthPriorities: [],
+    nextMonthPriorities,
     analystAppendix: buildMonthlyAnalystAppendix(report),
     note,
   };
+}
+
+function getMonthlyPriorityOwnerLabel(owner: WorkflowOwner): string {
+  if (owner === 'content' || owner === 'web_performance') {
+    return 'Shared follow-up';
+  }
+  return 'Agency action';
+}
+
+function isMeaningfulMonthlyWin(row: WorkflowMonthlyComparisonRow): boolean {
+  if (row.clicksDelta > 0) {
+    return true;
+  }
+
+  const hasExistingTraction = row.currentClicks > 0 || row.previousClicks > 0;
+  const hasMeaningfulVisibilityLift = row.impressionsDelta >= 100;
+  const isRankingBetter = row.positionDelta >= 0.5;
+
+  return row.clicksDelta >= 0 && hasExistingTraction && hasMeaningfulVisibilityLift && isRankingBetter;
+}
+
+function getMonthlyWinScore(row: WorkflowMonthlyComparisonRow): number {
+  return row.clicksDelta * 1000 + row.currentClicks * 100 + row.impressionsDelta * 2 + row.positionDelta * 25;
 }
 
 async function buildMonthlySeoReportSection(
@@ -583,11 +761,13 @@ async function buildMonthlySeoReportSection(
   ];
 
   const topQueryWinner = [...queryRows]
-    .sort((a, b) => b.clicksDelta - a.clicksDelta || b.impressionsDelta - a.impressionsDelta)
-    .find((row) => row.clicksDelta > 0 || row.impressionsDelta > 0);
+    .filter(isMeaningfulMonthlyWin)
+    .sort((a, b) => getMonthlyWinScore(b) - getMonthlyWinScore(a))
+    .at(0);
   const topPageWinner = [...pageRows]
-    .sort((a, b) => b.clicksDelta - a.clicksDelta || b.impressionsDelta - a.impressionsDelta)
-    .find((row) => row.clicksDelta > 0 || row.impressionsDelta > 0);
+    .filter(isMeaningfulMonthlyWin)
+    .sort((a, b) => getMonthlyWinScore(b) - getMonthlyWinScore(a))
+    .at(0);
   const biggestDecline = [...pageRows]
     .sort((a, b) => a.clicksDelta - b.clicksDelta || a.impressionsDelta - b.impressionsDelta)
     .find((row) => row.clicksDelta < 0 || row.impressionsDelta < 0);
@@ -666,14 +846,16 @@ async function buildMonthlySeoReportSection(
           };
         });
 
-  const nextMonthPriorities = report.actions.slice(0, 5).map((action) => ({
-    action: action.action,
-    owner: action.owner,
-    impact: action.impact,
-    clientSummary: action.clientSummary,
-  }));
+  const nextMonthPriorities = buildMonthlyPriorities(report.actions);
 
   return {
+    summary: buildMonthlyTopSummary({
+      kpiSummary,
+      topQueryWinner,
+      topPageWinner,
+      biggestDecline,
+      nextMonthPriorities,
+    }),
     comparison: {
       current: currentRange,
       previous: previousRange,
@@ -682,12 +864,12 @@ async function buildMonthlySeoReportSection(
     narrative,
     visibilityWins: {
       queries: [...queryRows]
-        .filter((row) => row.clicksDelta > 0 || row.impressionsDelta > 0)
-        .sort((a, b) => b.clicksDelta - a.clicksDelta || b.impressionsDelta - a.impressionsDelta)
+        .filter(isMeaningfulMonthlyWin)
+        .sort((a, b) => getMonthlyWinScore(b) - getMonthlyWinScore(a))
         .slice(0, 5),
       pages: [...pageRows]
-        .filter((row) => row.clicksDelta > 0 || row.impressionsDelta > 0)
-        .sort((a, b) => b.clicksDelta - a.clicksDelta || b.impressionsDelta - a.impressionsDelta)
+        .filter(isMeaningfulMonthlyWin)
+        .sort((a, b) => getMonthlyWinScore(b) - getMonthlyWinScore(a))
         .slice(0, 5),
     },
     popularSearches: {
@@ -695,8 +877,8 @@ async function buildMonthlySeoReportSection(
         .sort((a, b) => b.currentClicks - a.currentClicks || b.currentImpressions - a.currentImpressions)
         .slice(0, 10),
       risingQueries: [...queryRows]
-        .filter((row) => row.clicksDelta > 0 || row.impressionsDelta > 0)
-        .sort((a, b) => b.clicksDelta - a.clicksDelta || b.impressionsDelta - a.impressionsDelta)
+        .filter(isMeaningfulMonthlyWin)
+        .sort((a, b) => getMonthlyWinScore(b) - getMonthlyWinScore(a))
         .slice(0, 5),
     },
     topPages: {
@@ -704,8 +886,8 @@ async function buildMonthlySeoReportSection(
         .sort((a, b) => b.currentClicks - a.currentClicks || b.currentImpressions - a.currentImpressions)
         .slice(0, 10),
       improvingPages: [...pageRows]
-        .filter((row) => row.clicksDelta > 0 || row.impressionsDelta > 0)
-        .sort((a, b) => b.clicksDelta - a.clicksDelta || b.impressionsDelta - a.impressionsDelta)
+        .filter(isMeaningfulMonthlyWin)
+        .sort((a, b) => getMonthlyWinScore(b) - getMonthlyWinScore(a))
         .slice(0, 5),
     },
     brandPerformance,
@@ -883,6 +1065,16 @@ function buildListItems(items: string[]): string {
     .join('')}</ul>`;
 }
 
+function buildListItemsWithFallback(items: string[], emptyMessage: string): string {
+  if (items.length === 0) {
+    return `<p class="empty-state">${escapeHtml(emptyMessage)}</p>`;
+  }
+
+  return `<ul>${items
+    .map((item) => `<li>${escapeHtml(item)}</li>`)
+    .join('')}</ul>`;
+}
+
 function formatMonthlyMetricValue(metric: WorkflowMonthlyMetric): string {
   if (metric.label === 'Average Position') {
     return metric.current.toFixed(1);
@@ -908,12 +1100,85 @@ function formatMonthlyDelta(metric: WorkflowMonthlyMetric): string {
   return `${deltaPrefix}${deltaValue}${metric.format === 'percent' ? ' pts' : ''} (${pctText})`;
 }
 
-function buildMonthlyMarkdownRows(rows: WorkflowMonthlyComparisonRow[], includeBrand = false): string[] {
-  if (rows.length === 0) {
+function buildMonthlyMarkdownBullets(items: string[], emptyMessage: string): string[] {
+  return items.length > 0 ? items.map((item) => `- ${item}`) : [`- ${emptyMessage}`];
+}
+
+function formatSignedNumber(value: number, digits = 0): string {
+  const absValue =
+    digits > 0
+      ? Math.abs(value).toFixed(digits)
+      : Math.abs(Math.round(value)).toLocaleString('en-US');
+  if (value > 0) return `+${absValue}`;
+  if (value < 0) return `-${absValue}`;
+  return digits > 0 ? value.toFixed(digits) : Math.round(value).toLocaleString('en-US');
+}
+
+function formatMonthlyBrandLabel(segment?: WorkflowMonthlyComparisonRow['brandSegment']): string {
+  if (segment === 'branded') return 'Branded';
+  if (segment === 'non_branded') return 'Non-branded';
+  return 'Unclassified';
+}
+
+function getMonthlyRenderedRows(
+  rows: WorkflowMonthlyComparisonRow[],
+  detailMode: WorkflowDetailMode,
+): WorkflowMonthlyComparisonRow[] {
+  return detailMode === 'client' ? rows.slice(0, 5) : rows;
+}
+
+function formatMonthlyClientRowChange(row: WorkflowMonthlyComparisonRow): string {
+  const changes: string[] = [];
+  if (row.clicksDelta !== 0) {
+    changes.push(`${formatSignedNumber(row.clicksDelta)} clicks`);
+  }
+  if (row.impressionsDelta !== 0) {
+    changes.push(`${formatSignedNumber(row.impressionsDelta)} impressions`);
+  }
+
+  return changes.join(', ') || 'No material click or visibility change';
+}
+
+function formatMonthlyClientRowContext(row: WorkflowMonthlyComparisonRow): string {
+  const context: string[] = [];
+
+  if (Math.abs(row.positionDelta) >= 0.1) {
+    context.push(
+      `Position ${row.positionDelta > 0 ? 'improved' : 'softened'} ${Math.abs(row.positionDelta).toFixed(1)}`,
+    );
+  } else if (row.currentPosition > 0) {
+    context.push(`Position held at ${row.currentPosition.toFixed(1)}`);
+  }
+
+  if (row.currentCtr > 0) {
+    context.push(`CTR ${row.currentCtr.toFixed(2)}%`);
+  }
+
+  return context.join(' | ') || 'Steady relative to the previous period';
+}
+
+function buildMonthlyMarkdownRows(
+  rows: WorkflowMonthlyComparisonRow[],
+  detailMode: WorkflowDetailMode,
+  includeBrand = false,
+): string[] {
+  const visibleRows = getMonthlyRenderedRows(rows, detailMode);
+
+  if (visibleRows.length === 0) {
     return ['- No notable movement in this section for the selected period.'];
   }
 
-  return rows.map((row) => {
+  if (detailMode === 'client') {
+    return visibleRows.map((row) => {
+      const label =
+        includeBrand && row.brandSegment
+          ? `${row.label} (${formatMonthlyBrandLabel(row.brandSegment)})`
+          : row.label;
+      return `- ${label}: ${row.currentClicks.toLocaleString('en-US')} clicks this period; ${formatMonthlyClientRowChange(row)}; ${formatMonthlyClientRowContext(row)}.`;
+    });
+  }
+
+  return visibleRows.map((row) => {
     const brandText = includeBrand && row.brandSegment ? `; segment=${row.brandSegment}` : '';
     return `- ${row.label} [clicks=${row.currentClicks}; clicksDelta=${row.clicksDelta}; impressions=${row.currentImpressions}; impressionsDelta=${row.impressionsDelta}; position=${row.currentPosition}; positionDelta=${row.positionDelta}${brandText}]`;
   });
@@ -922,13 +1187,57 @@ function buildMonthlyMarkdownRows(rows: WorkflowMonthlyComparisonRow[], includeB
 function buildMonthlyHtmlTable(
   title: string,
   rows: WorkflowMonthlyComparisonRow[],
+  detailMode: WorkflowDetailMode,
   includeBrand = false,
 ): string {
-  if (rows.length === 0) {
+  const visibleRows = getMonthlyRenderedRows(rows, detailMode);
+
+  if (visibleRows.length === 0) {
     return `
       <article class="table-card">
         <h3>${escapeHtml(title)}</h3>
         <p class="empty-state">No notable movement in this section for the selected period.</p>
+      </article>
+    `;
+  }
+
+  if (detailMode === 'client') {
+    return `
+      <article class="table-card">
+        <h3>${escapeHtml(title)}</h3>
+        <div class="table-wrap">
+          <table class="compact-table">
+            <thead>
+              <tr>
+                <th>Label</th>
+                <th>Clicks</th>
+                <th>Change</th>
+                <th>Context</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${visibleRows
+                .map(
+                  (row) => `
+                <tr>
+                  <td>
+                    <div class="row-primary">${escapeHtml(row.label)}</div>
+                    ${
+                      includeBrand
+                        ? `<div class="row-meta">${escapeHtml(formatMonthlyBrandLabel(row.brandSegment))}</div>`
+                        : ''
+                    }
+                  </td>
+                  <td>${row.currentClicks.toLocaleString('en-US')}</td>
+                  <td>${escapeHtml(formatMonthlyClientRowChange(row))}</td>
+                  <td>${escapeHtml(formatMonthlyClientRowContext(row))}</td>
+                </tr>
+              `,
+                )
+                .join('')}
+            </tbody>
+          </table>
+        </div>
       </article>
     `;
   }
@@ -955,7 +1264,7 @@ function buildMonthlyHtmlTable(
             </tr>
           </thead>
           <tbody>
-            ${rows
+            ${visibleRows
               .map(
                 (row) => `
               <tr>
@@ -982,6 +1291,7 @@ function buildMonthlySeoMarkdownReport(
   report: WorkflowReport,
   monthly: WorkflowMonthlyReportSection,
 ): string {
+  const includeAppendix = report.meta.detailMode !== 'client';
   const lines: string[] = [];
   lines.push(`# ${report.meta.title}`);
   lines.push('');
@@ -998,6 +1308,19 @@ function buildMonthlySeoMarkdownReport(
     lines.push(`- ${monthly.note}`);
     lines.push('');
   }
+  lines.push('## TL;DR');
+  lines.push('');
+  lines.push(`- Outcome: ${monthly.summary.headline}`);
+  lines.push('');
+  lines.push('### What Improved');
+  lines.push(...buildMonthlyMarkdownBullets(monthly.summary.whatImproved, 'No major improvements stood out strongly enough to call out this period.'));
+  lines.push('');
+  lines.push('### What Needs Attention');
+  lines.push(...buildMonthlyMarkdownBullets(monthly.summary.needsAttention, 'No immediate problem areas stood out in the monthly comparison.'));
+  lines.push('');
+  lines.push('### What We\'re Doing Next');
+  lines.push(...buildMonthlyMarkdownBullets(monthly.summary.doingNext, 'No immediate next steps were pulled through from this run.'));
+  lines.push('');
   lines.push('## KPI Summary');
   lines.push('');
   if (monthly.kpiSummary.length === 0) {
@@ -1017,26 +1340,26 @@ function buildMonthlySeoMarkdownReport(
   lines.push('## Visibility Wins');
   lines.push('');
   lines.push('### Query Wins');
-  lines.push(...buildMonthlyMarkdownRows(monthly.visibilityWins.queries, true));
+  lines.push(...buildMonthlyMarkdownRows(monthly.visibilityWins.queries, report.meta.detailMode, true));
   lines.push('');
   lines.push('### Page Wins');
-  lines.push(...buildMonthlyMarkdownRows(monthly.visibilityWins.pages));
+  lines.push(...buildMonthlyMarkdownRows(monthly.visibilityWins.pages, report.meta.detailMode));
   lines.push('');
   lines.push('## Popular Searches');
   lines.push('');
   lines.push('### Top Queries');
-  lines.push(...buildMonthlyMarkdownRows(monthly.popularSearches.topQueries, true));
+  lines.push(...buildMonthlyMarkdownRows(monthly.popularSearches.topQueries, report.meta.detailMode, true));
   lines.push('');
   lines.push('### Rising Queries');
-  lines.push(...buildMonthlyMarkdownRows(monthly.popularSearches.risingQueries, true));
+  lines.push(...buildMonthlyMarkdownRows(monthly.popularSearches.risingQueries, report.meta.detailMode, true));
   lines.push('');
   lines.push('## Top Pages');
   lines.push('');
   lines.push('### Best Performing Pages');
-  lines.push(...buildMonthlyMarkdownRows(monthly.topPages.topPages));
+  lines.push(...buildMonthlyMarkdownRows(monthly.topPages.topPages, report.meta.detailMode));
   lines.push('');
   lines.push('### Improving Pages');
-  lines.push(...buildMonthlyMarkdownRows(monthly.topPages.improvingPages));
+  lines.push(...buildMonthlyMarkdownRows(monthly.topPages.improvingPages, report.meta.detailMode));
   lines.push('');
   lines.push('## Brand vs Non-Brand Performance');
   lines.push('');
@@ -1056,39 +1379,42 @@ function buildMonthlySeoMarkdownReport(
     lines.push('- No immediate next-month priorities identified.');
   } else {
     for (const item of monthly.nextMonthPriorities) {
-      lines.push(`- ${item.action} [owner=${item.owner}; impact=${item.impact}]`);
+      lines.push(`- ${item.action} [owner=${item.ownerLabel}; impact=${item.impact}]`);
     }
   }
-  lines.push('');
-  lines.push('## Analyst Appendix');
-  lines.push('');
-  lines.push(`- Client Summary: ${monthly.analystAppendix.clientSummary.join(' ')}`);
-  if (monthly.analystAppendix.analystSummary && monthly.analystAppendix.analystSummary.length > 0) {
-    lines.push(`- Analyst Summary: ${monthly.analystAppendix.analystSummary.join(' ')}`);
-  }
-  lines.push('');
-  lines.push('### Workflow Steps');
-  for (const step of monthly.analystAppendix.steps) {
-    lines.push(`- ${step.step} [status=${step.status}] ${step.summary}`);
-  }
-  lines.push('');
-  lines.push('### Supporting Issues');
-  if (monthly.analystAppendix.issues.length === 0) {
-    lines.push('- No issues identified.');
-  } else {
-    for (const issue of monthly.analystAppendix.issues.slice(0, 5)) {
-      lines.push(
-        `- ${issue.title} [severity=${issue.severity}; impact=${issue.impact}; owner=${issue.owner}]`,
-      );
+
+  if (includeAppendix) {
+    lines.push('');
+    lines.push('## Analyst Appendix');
+    lines.push('');
+    lines.push(`- Client Summary: ${monthly.analystAppendix.clientSummary.join(' ')}`);
+    if (monthly.analystAppendix.analystSummary && monthly.analystAppendix.analystSummary.length > 0) {
+      lines.push(`- Analyst Summary: ${monthly.analystAppendix.analystSummary.join(' ')}`);
     }
-  }
-  lines.push('');
-  lines.push('### Supporting Actions');
-  if (monthly.analystAppendix.actions.length === 0) {
-    lines.push('- No workflow actions identified.');
-  } else {
-    for (const action of monthly.analystAppendix.actions.slice(0, 5)) {
-      lines.push(`- ${action.action} [owner=${action.owner}; impact=${action.impact}]`);
+    lines.push('');
+    lines.push('### Workflow Steps');
+    for (const step of monthly.analystAppendix.steps) {
+      lines.push(`- ${step.step} [status=${step.status}] ${step.summary}`);
+    }
+    lines.push('');
+    lines.push('### Supporting Issues');
+    if (monthly.analystAppendix.issues.length === 0) {
+      lines.push('- No issues identified.');
+    } else {
+      for (const issue of monthly.analystAppendix.issues.slice(0, 5)) {
+        lines.push(
+          `- ${issue.title} [severity=${issue.severity}; impact=${issue.impact}; owner=${issue.owner}]`,
+        );
+      }
+    }
+    lines.push('');
+    lines.push('### Supporting Actions');
+    if (monthly.analystAppendix.actions.length === 0) {
+      lines.push('- No workflow actions identified.');
+    } else {
+      for (const action of monthly.analystAppendix.actions.slice(0, 5)) {
+        lines.push(`- ${action.action} [owner=${action.owner}; impact=${action.impact}]`);
+      }
     }
   }
 
@@ -1174,6 +1500,7 @@ function buildMonthlySeoHtmlReport(
   report: WorkflowReport,
   monthly: WorkflowMonthlyReportSection,
 ): string {
+  const includeAppendix = report.meta.detailMode !== 'client';
   const accentColor = report.meta.brand?.accentColor ?? '#0F172A';
   const brandName = report.meta.brand?.name ?? 'SEO Workflow';
   const logoMarkup = report.meta.brand?.logoUrl
@@ -1225,7 +1552,7 @@ function buildMonthlySeoHtmlReport(
               <article class="step-card">
                 <div class="step-card-head">
                   <h3>${escapeHtml(priority.action)}</h3>
-                  <span class="step-status status-success">${escapeHtml(priority.owner)}</span>
+                  <span class="step-status status-success">${escapeHtml(priority.ownerLabel)}</span>
                 </div>
                 <p class="step-copy">${escapeHtml(priority.clientSummary)}</p>
                 <p class="step-copy">Impact: ${escapeHtml(priority.impact)}</p>
@@ -1247,6 +1574,26 @@ function buildMonthlySeoHtmlReport(
       `,
     )
     .join('');
+  const appendixMarkup = includeAppendix
+    ? `
+      <section class="section summary-list">
+        <h2>Analyst Appendix</h2>
+        ${buildListItems(monthly.analystAppendix.clientSummary)}
+        ${
+          monthly.analystAppendix.analystSummary && monthly.analystAppendix.analystSummary.length > 0
+            ? `<h3>Analyst Notes</h3>${buildListItems(monthly.analystAppendix.analystSummary)}`
+            : ''
+        }
+      </section>
+
+      <section class="section">
+        <h2>Workflow Steps</h2>
+        <div class="step-grid">
+          ${appendixStepCards}
+        </div>
+      </section>
+    `
+    : '';
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -1436,6 +1783,15 @@ function buildMonthlySeoHtmlReport(
         text-transform: uppercase;
         letter-spacing: 0.08em;
       }
+      .row-primary {
+        font-weight: 600;
+      }
+      .row-meta {
+        margin-top: 4px;
+        color: var(--muted);
+        font-size: 0.82rem;
+        line-height: 1.4;
+      }
       @page {
         size: A4;
         margin: 14mm;
@@ -1466,11 +1822,38 @@ function buildMonthlySeoHtmlReport(
               <span class="pill">Pack: ${escapeHtml(report.pack.headline)}</span>
             </div>
           </div>
-          <p class="hero-copy">${escapeHtml(report.pack.summary)}</p>
+          <p class="hero-copy">${escapeHtml(monthly.summary.headline)}</p>
         </div>
       </section>
 
       ${noteMarkup}
+
+      <section class="section">
+        <h2>TL;DR</h2>
+        <div class="table-grid">
+          <article class="table-card summary-list">
+            <h3>What improved</h3>
+            ${buildListItemsWithFallback(
+              monthly.summary.whatImproved,
+              'No major improvements stood out strongly enough to call out this period.',
+            )}
+          </article>
+          <article class="table-card summary-list">
+            <h3>What needs attention</h3>
+            ${buildListItemsWithFallback(
+              monthly.summary.needsAttention,
+              'No immediate problem areas stood out in the monthly comparison.',
+            )}
+          </article>
+          <article class="table-card summary-list">
+            <h3>What we're doing next</h3>
+            ${buildListItemsWithFallback(
+              monthly.summary.doingNext,
+              'No immediate next steps were pulled through from this run.',
+            )}
+          </article>
+        </div>
+      </section>
 
       <section class="section">
         <h2>KPI Summary</h2>
@@ -1487,24 +1870,24 @@ function buildMonthlySeoHtmlReport(
       <section class="section">
         <h2>Visibility Wins</h2>
         <div class="table-grid">
-          ${buildMonthlyHtmlTable('Query Wins', monthly.visibilityWins.queries, true)}
-          ${buildMonthlyHtmlTable('Page Wins', monthly.visibilityWins.pages)}
+          ${buildMonthlyHtmlTable('Query Wins', monthly.visibilityWins.queries, report.meta.detailMode, true)}
+          ${buildMonthlyHtmlTable('Page Wins', monthly.visibilityWins.pages, report.meta.detailMode)}
         </div>
       </section>
 
       <section class="section">
         <h2>Popular Searches</h2>
         <div class="table-grid">
-          ${buildMonthlyHtmlTable('Top Queries', monthly.popularSearches.topQueries, true)}
-          ${buildMonthlyHtmlTable('Rising Queries', monthly.popularSearches.risingQueries, true)}
+          ${buildMonthlyHtmlTable('Top Queries', monthly.popularSearches.topQueries, report.meta.detailMode, true)}
+          ${buildMonthlyHtmlTable('Rising Queries', monthly.popularSearches.risingQueries, report.meta.detailMode, true)}
         </div>
       </section>
 
       <section class="section">
         <h2>Top Pages</h2>
         <div class="table-grid">
-          ${buildMonthlyHtmlTable('Best Performing Pages', monthly.topPages.topPages)}
-          ${buildMonthlyHtmlTable('Improving Pages', monthly.topPages.improvingPages)}
+          ${buildMonthlyHtmlTable('Best Performing Pages', monthly.topPages.topPages, report.meta.detailMode)}
+          ${buildMonthlyHtmlTable('Improving Pages', monthly.topPages.improvingPages, report.meta.detailMode)}
         </div>
       </section>
 
@@ -1522,22 +1905,7 @@ function buildMonthlySeoHtmlReport(
         </div>
       </section>
 
-      <section class="section summary-list">
-        <h2>Analyst Appendix</h2>
-        ${buildListItems(monthly.analystAppendix.clientSummary)}
-        ${
-          monthly.analystAppendix.analystSummary && monthly.analystAppendix.analystSummary.length > 0
-            ? `<h3>Analyst Notes</h3>${buildListItems(monthly.analystAppendix.analystSummary)}`
-            : ''
-        }
-      </section>
-
-      <section class="section">
-        <h2>Workflow Steps</h2>
-        <div class="step-grid">
-          ${appendixStepCards}
-        </div>
-      </section>
+      ${appendixMarkup}
     </main>
   </body>
 </html>`;
@@ -2111,7 +2479,9 @@ export async function handleRunSeoAuditWorkflow(
     } catch (error) {
       report.sections.monthlySeo = buildMonthlySeoFallbackSection(
         report,
-        'Monthly performance comparison could not be generated for this run. The workflow appendix is included below for follow-up.',
+        args.detailMode === 'client'
+          ? 'Monthly performance comparison could not be generated for this run.'
+          : 'Monthly performance comparison could not be generated for this run. The workflow appendix is included below for follow-up.',
       );
       if (args.detailMode !== 'client') {
         report.audience.analystSummary = [
@@ -2124,9 +2494,9 @@ export async function handleRunSeoAuditWorkflow(
 
   return jsonResult({
     ...payload,
-    clientSummary: professionalOutputs.clientSummary,
-    ...(professionalOutputs.analystSummary && professionalOutputs.analystSummary.length > 0
-      ? { analystSummary: professionalOutputs.analystSummary }
+    clientSummary: report.audience.clientSummary,
+    ...(report.audience.analystSummary && report.audience.analystSummary.length > 0
+      ? { analystSummary: report.audience.analystSummary }
       : {}),
     issues: professionalOutputs.issues,
     actions: professionalOutputs.actions,
